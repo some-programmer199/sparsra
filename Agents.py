@@ -304,12 +304,36 @@ def make_example_genome(n_neurons: int = 1000, n_connections: int = 5000, seed: 
     edges_arr = jnp.array(edges, dtype=jnp.float32)
     return normalize_genome(edges_arr, n_neurons=n_neurons, n_connections=n_connections, seed=seed)
     
-
+def agent_step(agent, n_steps=10, input_fn=None, threshold=1.0, reset=0.0):
+    """
+    Simulate the agent's SNN for n_steps using its genome.
+    Args:
+        agent: dict containing genome and n_neurons.
+        n_steps: number of simulation steps.
+        input_fn: function(step, state) -> input vector (n_neurons,) or None.
+        threshold: firing threshold for neurons.
+        reset: value to reset membrane after firing.
+    Returns:
+        states: (n_steps+1, n_neurons) membrane potentials over time.
+        spikes: (n_steps, n_neurons) spike events (bool).
+    """
+    genome = agent["genome"]
+    n_neurons = agent["neurons"].shape[0]
+    states, spikes = snn_sim.sim_mpsnn(
+        genome,
+        n_neurons=n_neurons,
+        n_steps=n_steps,
+        input_fn=input_fn,
+        threshold=threshold,
+        reset=reset
+    )
+    return states, spikes
 
 if __name__ == "__main__":
     # quick example that builds an agent using a standardized feedforward genome
     example_genome = make_example_genome(n_neurons=1000, n_connections=5000, seed=42)
     agent = develop_agent("test", example_genome, n_neurons=1000, net_n_neurons=1000, net_steps=10)
+    print(agent_step(agent, n_steps=5,input_fn=lambda step, state: jnp.array([jnp.sin(step * 0.5), jnp.cos(step * 0.5)])))
     print("agent neurons shape:", agent["neurons"].shape)
     # print first 5 neurons' [soma_x, soma_y, ax_x, ax_y]
     print(agent["neurons"][:5])

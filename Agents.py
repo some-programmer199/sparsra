@@ -5,7 +5,7 @@ import snn_sim
 agents={}
 
 
-def normalize_genome(genome, n_neurons: int = 1000, n_connections: int = 5000, seed: int = 0):
+def normalize_genome(genome, n_neurons: int = 500, n_connections: int = 2000, seed: int = 0):
     """
     Ensure genome is feedforward and standardized to (n_connections, 3).
 
@@ -36,7 +36,7 @@ def normalize_genome(genome, n_neurons: int = 1000, n_connections: int = 5000, s
     from_idx = jnp.clip(from_idx, 0, n_neurons - 1)
     to_idx = jnp.clip(to_idx, 0, n_neurons - 1)
 
-    # keep only feedforward edges (to >= from)
+    # keep only feedforward edges (to > from) - ignore to <= from
     mask = to_idx >= from_idx
     ff_from = from_idx[mask]
     ff_to = to_idx[mask]
@@ -66,7 +66,7 @@ def normalize_genome(genome, n_neurons: int = 1000, n_connections: int = 5000, s
     return out.astype(jnp.float32)
 
 def develop_agent(name, genome, n_neurons: int = 10000, normalize: bool = True,
-                  net_n_neurons: int = 1000, net_steps: int = 10):
+                  net_n_neurons: int = 500, net_steps: int = 10, activation: str = 'tanh'):
     """
     Build an agent with `n_neurons` by running a network-encoded `genome`
     (edge list) through `run_genome` for each neuron index.
@@ -83,8 +83,8 @@ def develop_agent(name, genome, n_neurons: int = 10000, normalize: bool = True,
     if N <= 0:
         raise ValueError("n_neurons must be positive")
 
-    # normalize/standardize genome to feedforward 1000-neuron network with 5000 connections
-    genome_arr = normalize_genome(genome, n_neurons=int(net_n_neurons), n_connections=5000, seed=0)
+    # normalize/standardize genome to feedforward net_n_neurons with 2000 connections
+    genome_arr = normalize_genome(genome, n_neurons=int(net_n_neurons), n_connections=2000, seed=0)
 
     def _mapper(idx):
         # Create highly nonlinear input features with discontinuities
@@ -106,21 +106,21 @@ def develop_agent(name, genome, n_neurons: int = 10000, normalize: bool = True,
             features[0] + 0.3 * features[1] + 0.2 * features[2],  # smooth + chaos
             features[3] + 0.5 * features[4]  # discrete jumps
         ], dtype=jnp.float32)
-        
+
         # Let the network run longer with these complex inputs
-        out = run_genome(genome_arr, data, n_neurons=int(net_n_neurons), n_steps=int(net_steps) * 2)
+        out = run_genome(genome_arr, data, n_neurons=int(net_n_neurons), n_steps=int(net_steps) * 2, activation=activation)
         return out  # no scaling needed, network can now produce diverse outputs
 
     # vectorize across neuron indices
     mapper_v = jax.vmap(_mapper, in_axes=0)
 
     indices = jnp.arange(N, dtype=jnp.float32)
-    raw_outputs = mapper_v(indices)  # expected (N, 5)
+    raw_outputs = mapper_v(indices)  # expected (N, 13)
 
-    # ensure shape (N, 5) for [soma_x, soma_y, ax_x, ax_y, radius]
+    # ensure shape (N, 12) for [soma_x, soma_y, ax_x, ax_y, radius?, weights4, spike4]
     raw = jnp.reshape(raw_outputs, (N, -1))
-    if raw.shape[1] != 5:
-        raise ValueError(f"Genome/run_genome must produce 5 values per neuron (got {raw.shape[1]})")
+    if raw.shape[1] != 13:
+        raise ValueError(f"Genome/run_genome must produce 13 values per neuron (got {raw.shape[1]})")
 
     # Normalize soma positions, axon offsets, and radii separately
     if normalize:
@@ -184,29 +184,35 @@ def develop_agent(name, genome, n_neurons: int = 10000, normalize: bool = True,
     radii_broadcast = radii[:, None]  # (N, 1)
     connections_mask = (distances <= radii_broadcast) & (triu > 0)
     
-    # get connection indices and generate random weights
+    # get connection indices (feedforward only: from<i to>j)
     from_idx, to_idx = jnp.where(connections_mask)
-    n_valid = len(from_idx)
-    key = jax.random.PRNGKey(0)
-    weights = jax.random.uniform(key, (n_valid,), minval=-1.0, maxval=1.0)
-    
-    # pack into edges array and normalize to desired connection count
-    edges = jnp.stack([from_idx, to_idx, weights], axis=1)
+    # pack into integer-only edge list (E,2) using neuron indices
+    edges = jnp.stack([from_idx.astype(jnp.int32), to_idx.astype(jnp.int32)], axis=1).astype(jnp.int32)
+
+    # Build main neuron weights and spike templates by running run_genome for all neurons
+    # run_genome returns a 12-vector per neuron: soma(2), axon(2), radius(1), weights(4), spike_template(4)
+    per_neuron = raw  # raw from earlier mapping should contain all outputs per neuron
+    # Extract weights and spike templates
+    main_weights = per_neuron[:, 5:9]
+    main_spike = per_neuron[:, 9:13]
 
     agent = {
-        "name": name,
+        "id": name,
         "genome": genome_arr,
         "age": 0,
-        "score": 0,
-        "neurons": neurons,  # shape (N,5): [soma_x, soma_y, ax_x, ax_y, radius]
-        "spatial_edges": edges.astype(jnp.float32)  # (E,3) [from,to,weight]
+        "fitness": 0,
+        "main connections": edges,  # (E,2) [from,to] as int32
+        "main neuron weights": main_weights,  # (N,4)
+        "main neuron spike": main_spike,  # (N,4)
+        "state": jnp.zeros((N, 4), dtype=jnp.float32),  # per-neuron internal state (4 values)
+        # we no longer keep soma/axon positions after develop_agent; use indices only
     }
     agents[name] = agent
     return agent
   # should be (10000, 4)
 #genome is a list or array with [from,to,weight] lists, assume there are 1000 neurons in the genome network, 2 neurons are where the input is given, 4 neurons are monitered for output
-def run_genome(genome, data, n_neurons: int = 1000, n_steps: int = 10,
-               input_idxs=(0, 1), output_idxs=None):
+def run_genome(genome, data, n_neurons: int = 500, n_steps: int = 10,
+               input_idxs=(0, 1), output_idxs=None, activation: str = 'tanh'):
     """
     Run a genome given as edges [from, to, weight].
 
@@ -233,17 +239,32 @@ def run_genome(genome, data, n_neurons: int = 1000, n_steps: int = 10,
     if data.shape[0] != input_idxs.shape[0]:
         raise ValueError("`data` length must match number of input_idxs")
 
+    # choose output indices: last 12 neurons by default
     if output_idxs is None:
-        output_idxs = jnp.arange(N - 5, N, dtype=jnp.int32)  # get last 5 outputs: [soma_x, soma_y, ax_x, ax_y, radius]
+        output_idxs = jnp.arange(N - 12, N, dtype=jnp.int32)
     else:
         output_idxs = jnp.asarray(output_idxs, dtype=jnp.int32)
 
+    # select activation
+    if activation == 'tanh':
+        act = jnp.tanh
+    elif activation == 'relu':
+        act = jax.nn.relu
+    elif activation == 'sigmoid':
+        act = jax.nn.sigmoid
+    elif activation == 'linear':
+        act = lambda x: x
+    else:
+        # allow callables passed as strings? keep default tanh
+        act = jnp.tanh
+
     def step(state, _):
-        # gather presynaptic values, multiply by weights, and accumulate to targets
+        # message passing: accumulate presynaptic contributions
         presyn = state[from_idx] * weights
         summed = jnp.zeros(N, dtype=jnp.float32).at[to_idx].add(presyn)
-        # Use tanh + relu combination for more dynamic range
-        new_state = jnp.tanh(summed) + jax.nn.relu(summed) * 0.1
+        # apply activation and a small linear leak for dynamics
+        new_state = act(summed) + 0.05 * summed
+        # inject external inputs to input_idxs
         new_state = new_state.at[input_idxs].set(data)
         return new_state, None
 
@@ -251,7 +272,26 @@ def run_genome(genome, data, n_neurons: int = 1000, n_steps: int = 10,
     state0 = jnp.zeros(N, dtype=jnp.float32).at[input_idxs].set(data)
     final_state, _ = jax.lax.scan(step, state0, None, length=n_steps)
     outputs = final_state[output_idxs]
-    return outputs
+
+    # ensure length 12
+    if outputs.shape[0] < 12:
+        pad = jnp.zeros(12 - outputs.shape[0], dtype=jnp.float32)
+        outputs = jnp.concatenate([outputs, pad], axis=0)
+    elif outputs.shape[0] > 12:
+        outputs = outputs[:12]
+
+    # Semantic packing: [soma_x(2), soma_y(2)? wait, we expect: soma_x,y, ax_x,y, radius, weights(4), spike_template(4)]
+    # We'll take:
+    soma = outputs[0:2]
+    axon = outputs[2:4]
+    radius = outputs[4:5]
+    # remaining 7 values -> split into 4 weights and 3 spike template values; to reach 12, pad if needed
+    rest = outputs[5:12]
+    if rest.shape[0] < 8:
+        rest = jnp.concatenate([rest, jnp.zeros(8 - rest.shape[0], dtype=jnp.float32)], axis=0)
+    main_weights = rest[0:4]
+    spike_template = rest[4:8]
+    return jnp.concatenate([soma, axon, radius, main_weights, spike_template], axis=0)
 
 
 def make_example_genome(n_neurons: int = 1000, n_connections: int = 5000, seed: int = 0):
@@ -317,23 +357,32 @@ def agent_step(agent, n_steps=10, input_fn=None, threshold=1.0, reset=0.0):
         states: (n_steps+1, n_neurons) membrane potentials over time.
         spikes: (n_steps, n_neurons) spike events (bool).
     """
-    genome = agent["genome"]
-    n_neurons = agent["neurons"].shape[0]
+    edges = agent.get("main connections")
+    if edges is None:
+        raise ValueError("Agent has no 'main connections' to simulate")
+    # number of neurons is the first dimension of agent state
+    n_neurons = int(agent["state"].shape[0])
+    # Flatten agent state to a single vector by summing or selecting a channel; here we sum across channels
+    initial_state = jnp.sum(agent["state"], axis=1)
     states, spikes = snn_sim.sim_mpsnn(
-        genome,
+        edges,
         n_neurons=n_neurons,
         n_steps=n_steps,
         input_fn=input_fn,
         threshold=threshold,
-        reset=reset
+        reset=reset,
+        initial_state=initial_state
     )
-    return states, spikes
+    # Update agent state: take final membrane potentials and expand into 4 channels (replicate)
+    final = states[-1]
+    agent["state"] = jnp.tile(final[:, None], (1, agent["state"].shape[1]))
+    return agent, states, spikes
 
 if __name__ == "__main__":
     # quick example that builds an agent using a standardized feedforward genome
-    example_genome = make_example_genome(n_neurons=1000, n_connections=5000, seed=42)
-    agent = develop_agent("test", example_genome, n_neurons=1000, net_n_neurons=1000, net_steps=10)
+    example_genome = make_example_genome(n_neurons=500, n_connections=2000, seed=42)
+    agent = develop_agent("test", example_genome, n_neurons=500, net_n_neurons=500, net_steps=10)
     print(agent_step(agent, n_steps=5,input_fn=lambda step, state: jnp.array([jnp.sin(step * 0.5), jnp.cos(step * 0.5)])))
-    print("agent neurons shape:", agent["neurons"].shape)
-    # print first 5 neurons' [soma_x, soma_y, ax_x, ax_y]
-    print(agent["neurons"][:5])
+    print("main connections shape:", agent["main connections"].shape)
+    # show first 10 index-based connections
+    print("first edges:", agent["main connections"][:10])

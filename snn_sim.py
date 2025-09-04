@@ -11,9 +11,14 @@ def build_bcoo_matrix(genome, n_neurons):
     genome: array-like (E,3) [from, to, weight]
     Returns: bcoo.BCOO of shape (n_neurons, n_neurons)
     """
-    edges = jnp.asarray(genome, dtype=jnp.float32)
+    edges = jnp.asarray(genome)
+    if edges.ndim != 2 or edges.shape[1] not in (2, 3):
+        raise ValueError("genome edges must be shape (E,2) or (E,3)")
     idx = edges[:, :2].astype(jnp.int32)
-    w = edges[:, 2]
+    if edges.shape[1] == 3:
+        w = edges[:, 2].astype(jnp.float32)
+    else:
+        w = jnp.ones((idx.shape[0],), dtype=jnp.float32)
     mat = bcoo.BCOO((w, idx), shape=(n_neurons, n_neurons))
     return mat
 
@@ -24,7 +29,8 @@ def sim_mpsnn(
     n_steps=10,
     input_fn=None,
     threshold=1.0,
-    reset=0.0
+    reset=0.0,
+    initial_state=None
 ):
     """
     Message-passing SNN simulation using JAX and BCOO.
@@ -42,12 +48,28 @@ def sim_mpsnn(
         spikes: (n_steps, n_neurons) spike events (bool)
     """
     conn = build_bcoo_matrix(genome, n_neurons)
-    state0 = jnp.zeros(n_neurons, dtype=jnp.float32)
+    # allow caller to provide a starting state
+    if initial_state is None:
+        state0 = jnp.zeros(n_neurons, dtype=jnp.float32)
+    else:
+        state0 = jnp.asarray(initial_state, dtype=jnp.float32)
 
     def step_fn(carry, t):
         state = carry
         # External input
         input_vec = input_fn(t, state) if input_fn is not None else jnp.zeros_like(state)
+        # Ensure input_vec is an array and compatible with state shape.
+        input_vec = jnp.asarray(input_vec, dtype=jnp.float32)
+        if input_vec.shape != state.shape:
+            # allow short vectors to be injected into the first indices (e.g., length 2 -> neurons [0,1])
+            if input_vec.ndim == 0:
+                input_vec = jnp.full_like(state, input_vec)
+            elif input_vec.ndim == 1 and input_vec.shape[0] <= state.shape[0]:
+                buf = jnp.zeros_like(state)
+                buf = buf.at[: input_vec.shape[0]].set(input_vec)
+                input_vec = buf
+            else:
+                raise ValueError(f"input_fn returned shape {input_vec.shape} incompatible with state shape {state.shape}")
         # Compute incoming spikes (who fired last step)
         presyn_spikes = state > threshold
         # Message passing: weighted sum of presynaptic spikes

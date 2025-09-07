@@ -8,9 +8,10 @@ from jax import random
 
 def cppn_single(params, neuron_idx):
     """Generate one neuron's properties from genome (CPPN)."""
-    x = jnp.array([neuron_idx / 10000.0])  # scaled idx
-    
+    x = jnp.array([neuron_idx / 100])  # scaled idx (remember to change)
+    print(params["W1"].shape)
     h1 = jnp.tanh(x @ params["W1"] + params["b1"])
+    
     h2 = jnp.sin(h1 @ params["W2"] + params["b2"])
     h3 = jax.nn.sigmoid(h2 @ params["W3"] + params["b3"])
     

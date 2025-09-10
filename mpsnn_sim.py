@@ -8,8 +8,7 @@ from jax import random
 
 def cppn_single(params, neuron_idx):
     """Generate one neuron's properties from genome (CPPN)."""
-    x = jnp.array([neuron_idx / 100])  # scaled idx (remember to change)
-    print(params["W1"].shape)
+    x = jnp.array([neuron_idx / 50])  # scaled idx (remember to change)
     h1 = jnp.tanh(x @ params["W1"] + params["b1"])
     
     h2 = jnp.sin(h1 @ params["W2"] + params["b2"])
@@ -112,16 +111,17 @@ def snn_step(state, spikes, refractory, agent,inputs, refractory_steps=2,dt=0):
 # =====================================================
 
 if __name__ == "__main__":
-    key = random.PRNGKey(0)
+    key = random.PRNGKey(42)
     params = init_cppn_params(key)
     agent = develop_agent(params, num_neurons=50)
     inputs=jnp.zeros(50)
-    inputs=inputs.at[:40].set(10.0)
+    inputs=inputs.at[:50].set(10.0)
     state = jnp.zeros(50)
     spikes = jnp.zeros(50, dtype=bool)
     refractory = jnp.zeros(50, dtype=int)
     
     for t in range(10):
         state, spikes, refractory = snn_step(state, spikes, refractory, agent,inputs=inputs, refractory_steps=2)
-
+        inputs=jnp.zeros(50)
+        inputs=inputs.at[:10].set(10.0)
         print(f"Timestep {t}: spikes={spikes.sum()}, avgV={state.mean():.3f}, refractory={refractory.sum()}")
